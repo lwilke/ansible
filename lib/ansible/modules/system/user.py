@@ -205,6 +205,15 @@ options:
         description:
             - An expiry time for the user in epoch, it will be ignored on platforms that do not support this.
               Currently supported on Linux and FreeBSD.
+    force_pw_change:
+        version_added: "2.4"
+        required: false
+        default: "no"
+        choices: [ "yes", "no" ]
+        description:
+            - If true and the platform supports it, the password is marked as
+              expired. The user will be forced to change its password on next
+              login. Currently supported on Linux.
 '''
 
 EXAMPLES = '''
@@ -273,6 +282,7 @@ class User(object):
       - ssh_key_gen()
       - ssh_key_fingerprint()
       - user_exists()
+      - enforce_pw_change()
 
     All subclasses MUST define platform and distribution (which may be None).
     """
@@ -286,33 +296,34 @@ class User(object):
         return load_platform_subclass(User, args, kwargs)
 
     def __init__(self, module):
-        self.module     = module
-        self.state      = module.params['state']
-        self.name       = module.params['name']
-        self.uid        = module.params['uid']
-        self.non_unique  = module.params['non_unique']
-        self.seuser     = module.params['seuser']
-        self.group      = module.params['group']
-        self.comment    = module.params['comment']
-        self.shell      = module.params['shell']
-        self.password   = module.params['password']
-        self.force      = module.params['force']
-        self.remove     = module.params['remove']
-        self.createhome = module.params['createhome']
-        self.move_home  = module.params['move_home']
-        self.skeleton   = module.params['skeleton']
-        self.system     = module.params['system']
-        self.login_class = module.params['login_class']
-        self.append     = module.params['append']
-        self.sshkeygen  = module.params['generate_ssh_key']
-        self.ssh_bits   = module.params['ssh_key_bits']
-        self.ssh_type   = module.params['ssh_key_type']
-        self.ssh_comment = module.params['ssh_key_comment']
-        self.ssh_passphrase = module.params['ssh_key_passphrase']
+        self.module          = module
+        self.state           = module.params['state']
+        self.name            = module.params['name']
+        self.uid             = module.params['uid']
+        self.non_unique      = module.params['non_unique']
+        self.seuser          = module.params['seuser']
+        self.group           = module.params['group']
+        self.comment         = module.params['comment']
+        self.shell           = module.params['shell']
+        self.password        = module.params['password']
+        self.force           = module.params['force']
+        self.remove          = module.params['remove']
+        self.createhome      = module.params['createhome']
+        self.move_home       = module.params['move_home']
+        self.skeleton        = module.params['skeleton']
+        self.system          = module.params['system']
+        self.login_class     = module.params['login_class']
+        self.append          = module.params['append']
+        self.sshkeygen       = module.params['generate_ssh_key']
+        self.ssh_bits        = module.params['ssh_key_bits']
+        self.ssh_type        = module.params['ssh_key_type']
+        self.ssh_comment     = module.params['ssh_key_comment']
+        self.ssh_passphrase  = module.params['ssh_key_passphrase']
         self.update_password = module.params['update_password']
-        self.home    = module.params['home']
-        self.expires = None
-        self.groups = None
+        self.home            = module.params['home']
+        self.force_pw_change = module.params['force_pw_change']
+        self.expires         = None
+        self.groups          = None
 
         if module.params['groups'] is not None:
             self.groups = ','.join(module.params['groups'])
@@ -328,7 +339,6 @@ class User(object):
             self.ssh_file = module.params['ssh_key_file']
         else:
             self.ssh_file = os.path.join('.ssh', 'id_%s' % self.ssh_type)
-
 
     def execute_command(self, cmd, use_unsafe_shell=False, data=None, obey_checkmode=True):
         if self.module.check_mode and obey_checkmode:
@@ -348,6 +358,12 @@ class User(object):
         cmd.append(self.name)
 
         return self.execute_command(cmd)
+
+    def enforce_pw_change_chage(self):
+        cmd_chage = [self.module.get_bin_path('chage', True)]
+        cmd_chage.append('-d 0')
+        cmd_chage.append(self.name)
+        return self.execute_command(cmd_chage)
 
     def create_user_useradd(self, command_name='useradd'):
         cmd = [self.module.get_bin_path(command_name, True)]
@@ -422,7 +438,6 @@ class User(object):
         cmd.append(self.name)
         return self.execute_command(cmd)
 
-
     def _check_usermod_append(self):
         # check if this version of usermod can append groups
         usermod_path = self.module.get_bin_path('usermod', True)
@@ -443,8 +458,6 @@ class User(object):
                 return True
 
         return False
-
-
 
     def modify_user_usermod(self):
         cmd = [self.module.get_bin_path('usermod', True)]
@@ -587,6 +600,21 @@ class User(object):
             return False
         return list(pwd.getpwnam(self.name))
 
+    def get_spwd_info(self):
+        if not self.user_exists():
+            return False
+        if HAVE_SPWD:
+            try:
+                return list(spwd.getspnam(self.name))
+            except:
+                return False
+        elif self.SHADOWFILE:
+            if os.path.exists(self.SHADOWFILE) and os.access(self.SHADOWFILE, os.R_OK):
+                for line in open(self.SHADOWFILE).readlines():
+                    if line.startswith('%s:' % self.name):
+                        return line.split(':')
+        return False
+
     def user_info(self):
         if not self.user_exists():
             return False
@@ -594,6 +622,11 @@ class User(object):
         if len(info[1]) == 1 or len(info[1]) == 0:
             info[1] = self.user_password()
         return info
+
+    def user_shadow_info(self):
+        if not self.user_exists():
+            return False
+        return self.get_spwd_info()
 
     def user_password(self):
         passwd = ''
@@ -726,6 +759,8 @@ class User(object):
             e = get_exception()
             self.module.exit_json(failed=True, msg="%s" % e)
 
+    def enforce_pw_change(self):
+        return self.enforce_pw_change_chage()
 
 # ===========================================
 
@@ -2152,6 +2187,7 @@ def main():
             ssh_key_passphrase=dict(default=None, type='str', no_log=True),
             update_password=dict(default='always',choices=['always','on_create'],type='str'),
             expires=dict(default=None, type='float'),
+            force_pw_change=dict(default='no', type='bool'),
         ),
         supports_check_mode=True
     )
@@ -2229,6 +2265,20 @@ def main():
                 user.create_homedir(user.home)
                 user.chown_homedir(info[2], info[3], user.home)
             result['changed'] = True
+
+        # Force user to change its pw on next login.
+        if user.force_pw_change:
+            sinfo = user.user_shadow_info()
+            if sinfo is False or len(sinfo) != 9:
+                result['msg'] = "failed to look up (shadow) user name: %s" % user.name
+                result['failed'] = True
+            if sinfo[2] != 0:
+                (rc, out, err) = user.enforce_pw_change()
+                if rc is not None and rc != 0:
+                    module.fail_json(name=user.name, msg=err, rc=rc)
+                if rc is not None and rc == 0:
+                    result['changed'] = True
+            result['force_pw_change'] = user.user_shadow_info()[2]
 
         # deal with ssh key
         if user.sshkeygen:
